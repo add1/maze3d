@@ -1,0 +1,711 @@
+<!doctype html>
+<html>
+<head>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+
+  <div >
+  <svg version=1.1 width=1000 height=1000 id=viewport style='border:2px solid blue;'>
+  </svg>
+
+  <svg version=1.1 width=500 height=500 id=map style=''>
+    <circle id=observer cx=100 cy=100 r=10 stroke=blue fill=green stroke-width=3px />
+    <line class=direction id=direction x1=100 y1=100 x2=150 y2=100 stroke-width=3px stroke=blue />
+  </svg>
+  </div>
+
+  <div id=level style="position:absolute; top:0px; left:1100px; height:100px; width:400px; background:#ccc; font-size:50pt; text-align:center">
+     Level 1
+  </div>
+  <div id=luke-div style="position:absolute; top:800px; left:1100px; height:100px; width:400px; font-size:20pt; text-align:center">
+  </div>
+  <div id=dashboard style="position:absolute; top:125px; left:1200px; height:100px; width:100px; font-size:20pt; text-align:center">
+    <svg version=1.1 width=100 height=100 id=direction>
+       <line id=direction-arrow x1=50 x2=75 y1=50 y2=50 stroke="black" stroke-width=2 />
+       <circle id=direction-center cx=50 cy=50 r=5 fill=#000 />
+    </svg>
+  </div>
+  <div id=closeness style="position:absolute; top:125px; left:1300px; width:100px; height:100px; background-color:green;">&nbsp;</div>
+
+  <div id=gamestatus style="position:absolute; top:250px; left:1100px; width:400px; height:250px; background-color:#aaa"> 
+    &nbsp;
+  </div>
+
+
+</body>
+
+<script>
+  let socket=io();
+
+  let MAZE_HEIGHT=7;
+  let MAZE_WIDTH=7;
+  let LEVEL=0
+  let MAX_LEVEL=Infinity;
+
+  let VISION_ANGLE_VERTICAL = 45 / 360 * (2*Math.PI);
+  let VISION_ANGLE_HORIZONTAL = 45 / 360 * (2*Math.PI);
+  let VISION_HEIGHT = 1000;
+  let VISION_WIDTH = 1000;
+
+  let PLAYER_ID = -1;
+
+  let freeze=false;
+
+  username = "";
+
+  let dead_ends=undefined;
+  let maze=undefined;
+  player_list = [];
+
+  let stick_person = [
+      [0,290], 
+      [15,285], 
+      [30,230],
+      [57,175],
+      [57,75], 
+      [50,75],
+      [45,125], 
+      [5,155],
+      [45,125],
+      [50,75],
+      [57,75], 
+      [73,75],
+      [80,75], 
+      [135,115], 
+      [135,120], 
+      [85,135], 
+      [135,120], 
+      [135,115], 
+      [80,75],
+      [57, 75], 
+      [30,55], 
+      [30,20], 
+      [65,0], 
+      [100,20], 
+      [100,55],
+      [73,75],
+      [73,175], 
+      [90,230], 
+      [115,285], 
+      [95,290]];
+
+
+  function calculate_polar_coordinates(observer, x1,y1,z1) {
+      x=observer.x
+      y=observer.y
+      z=observer.z
+      theta=observer.direction_rad
+
+      horizontal_distance = Math.sqrt((x-x1)**2 + (y-y1)**2);
+      horizontal_angle = Math.asin( (x1-x) / horizontal_distance);
+      if (y < y1) { 
+          horizontal_angle= Math.PI - horizontal_angle;
+      }
+
+      vertical_distance = Math.sqrt( horizontal_distance**2 + (z - z1)**2);
+      vertical_angle = Math.asin( (z-z1) / vertical_distance);
+      
+      return [horizontal_angle, vertical_angle];
+  }
+
+  rendered_map=false;
+  function show_map(observer, walls) {
+
+
+     if (!rendered_map) {
+       console.log("setting user token color", observer.color);
+       $("#observer").attr("fill", observer.color);
+
+       dead_ends.forEach( (p) => {
+         x=p[1];
+         y=p[0];
+         map.append(`<rect class=mapfill x=${x*20+3} y=${y*20+3} width=14 height=14 fill="#ffd" />`);
+       })
+
+       map = $("#map");
+       map.find(".mapwall").remove();
+       map.find(".mapfill").remove();
+
+       for (i=0; i<walls.length; i++) {
+         wall = walls[i];
+         d = `M ${wall.x1} ${wall.y1}, ${wall.x2} ${wall.y2}`
+         map.append(`<path class=mapwall id="mapwall${i}" d="${d}" stroke="${wall.color}" stroke-width="5px"></path>`);
+       }
+       rendered_map=true;
+
+       for (y=0; y<maze.length; y++) {
+         for (x=0; x<maze[y].length; x++) {
+           if (maze[y][x].present) {
+             map.append(`<rect class=mapfill x=${x*20} y=${y*20} width=20 height=20 fill="#777"/>`);
+           }
+         }
+       }
+
+       update_map(1,1);
+       maze[1][1].explored=true;
+       maze[1][1].onmap=true;
+     }
+
+     $("#observer").attr("cx", observer.x);
+     $("#observer").attr("cy", observer.y);
+     $("#direction").attr("x1", observer.x);
+     $("#direction").attr("y1", observer.y);
+     $("#direction").attr("x2", observer.x + Math.sin(observer.direction_rad) * 10);
+     $("#direction").attr("y2", observer.y - Math.cos(observer.direction_rad) * 10);
+
+     document.getElementById("map").innerHTML += "";
+  }
+
+  function show_players_on_map(player_list) {
+     map.find(".players").remove()
+     for (let i=0; i<player_list.length; i++) {
+         if ( player_list[i].id !== PLAYER_ID && player_list[i].level === LEVEL ) {
+             map.append(`<circle class=players cx=${player_list[i]['position-x']} cy=${player_list[i]['position-y']} r=10 fill=${player_list[i].color} />`);
+         }
+     }
+     document.getElementById("map").innerHTML += "";
+  }
+
+  function update_map(y,x) {
+    map = $("#map");
+    map.append(`<rect class=mapfill x=${x*20} y=${y*20} width=20 height=20 fill-opacity=.5 fill="#8f8"/>`);
+  }
+
+  function show(observer, walls, wallid) {
+    angle_c1=calculate_polar_coordinates(observer, walls[wallid].x1, walls[wallid].y1, walls[wallid].z1);
+    angle_c2=calculate_polar_coordinates(observer, walls[wallid].x2, walls[wallid].y2, walls[wallid].z1);
+    angle_c3=calculate_polar_coordinates(observer, walls[wallid].x2, walls[wallid].y2, walls[wallid].z2);
+    angle_c4=calculate_polar_coordinates(observer, walls[wallid].x1, walls[wallid].y1, walls[wallid].z2);
+
+    corners = [];
+
+    wall_is_visible=false;
+    wall_is_left=false;
+    wall_is_right=false;
+    angle_sum=0;
+    for (i=0; i<4; i++) {
+      angle = [angle_c1, angle_c2, angle_c3, angle_c4][i];
+      angle0 = angle[0];
+
+      angle[0] = (angle[0] - observer.direction_rad);
+
+      angle[0] = ((((angle[0])  % (Math.PI * 2)) + Math.PI*2 ) % (Math.PI*2));
+      if (angle[0] > Math.PI) {
+         angle[0] = angle[0] - Math.PI*2;
+      }
+      angle_sum += Math.abs(angle[0]);
+
+      x = (angle[0] / VISION_ANGLE_HORIZONTAL) * VISION_WIDTH + VISION_WIDTH / 2;
+      y = (angle[1] / VISION_ANGLE_VERTICAL) * VISION_HEIGHT + VISION_HEIGHT / 2;
+
+      corners.push( [ x.toFixed(0),y.toFixed(0) ] );
+    }
+    wall_is_visible=(angle_sum<Math.PI*2);
+    rendered_wall=$("#"+`myline${wallid}`);
+    distance=walls[wallid].distance;
+    if (wall_is_visible==true) {
+      wall=`M ${corners[0][0]} ${corners[0][1]}`;
+      for (i=1; i<4; i++) {
+        wall=wall.concat(`, ${corners[i][0]} ${corners[i][1]}`); 
+      }
+
+      wall+=' Z';
+
+      if (rendered_wall.length == 0) {
+        $("#viewport").append(`<path id=myline${wallid} d="${wall}" stroke=black stroke-width=5px fill=${walls[wallid].color}\>`);
+      } else {
+        $("#"+`myline${wallid}`).attr("d", wall);
+        $("#"+`myline${wallid}`).attr("fill", walls[wallid].color);
+        $("#"+`myline${wallid}`).attr("stroke-width", "5px");
+      }
+    } else {
+      if (rendered_wall.length == 0) {
+        wall="M 100 100, 200, 100, 100,200";
+        $("#viewport").append(`<path id=myline${wallid} d="${wall}" stroke=black stroke-width=0px fill=transparent\>`);
+      } else {
+        $("#"+`myline${wallid}`).attr("fill", "transparent");
+        $("#"+`myline${wallid}`).attr("stroke-width", "0px");
+      }
+    }
+    $("#"+`myline${wallid}`).attr("distance", `${distance}`);
+    walls[wallid].id=wallid;
+  };
+
+
+  function valid_position(maze, y,x) {
+    let ypos=Math.floor(y/20,0);
+    let top=Math.floor((y-5)/20,0);
+    let bot=Math.floor((y+5)/20,0);
+    let xpos=Math.floor(x/20,0);
+    let left=Math.floor((x-5)/20,0);
+    let right=Math.floor((x+5)/20,0);
+
+    if ( maze[ypos][xpos].present ||
+         maze[bot][left].present ||
+         maze[bot][right].present ||
+         maze[top][left].present ||
+         maze[top][right].present) {
+
+      return false;
+    } else {
+      return true;
+    }
+  }
+
+  let code_char=0;
+  let map_phrase="dad4tw";
+  function move(event) {
+    if (freeze) {
+      return;
+    }
+    let move_distance = 10;
+    let shift=event.originalEvent.shiftKey;
+    let x_at_start=observer.x;
+    let y_at_start=observer.y;
+    let direction_at_start_rad =  observer.direction_rad;
+    let key_repeat_delay=10;
+    if(event.originalEvent.key == "ArrowRight") {
+      if (shift) {
+        observer.x += Math.cos(observer.direction_rad) * move_distance;
+        observer.y += Math.sin(observer.direction_rad) * move_distance;
+      } else {
+        observer.direction_rad += Math.PI/6
+        key_repeat_delay=1000;
+      }
+    }
+    if(event.originalEvent.key == "ArrowLeft") {
+      if (shift) {
+        observer.x -= Math.cos(observer.direction_rad) * move_distance;
+        observer.y -= Math.sin(observer.direction_rad) * move_distance;
+      } else {
+        observer.direction_rad -= Math.PI/6
+        key_repeat_delay=300;
+      }
+    }
+    if(event.originalEvent.key == "ArrowUp") {
+      observer.x += Math.sin(observer.direction_rad) * move_distance;
+      observer.y -= Math.cos(observer.direction_rad) * move_distance;
+    }
+    if(event.originalEvent.key == "ArrowDown") {
+      observer.x -= Math.sin(observer.direction_rad) * move_distance;
+      observer.y += Math.cos(observer.direction_rad) * move_distance;
+    }
+
+      /*
+    if(event.originalEvent.key == "q" && code_char<=1) {
+      code_char=1;
+    } else if (event.originalEvent.key == "u" && code_char<=2){
+      code_char=2;
+    } else if (event.originalEvent.key == "i" && code_char<=3){
+      code_char=3;
+    } else if (event.originalEvent.key == "t" && code_char<=4){
+      code_char=0;
+      $("#map").css("display", "inline")
+    } else {
+      code_char=0;
+    }
+    */
+
+    if(event.originalEvent.key == map_phrase[code_char]) {
+      code_char+=1;
+    } else if ((code_char >= 1) && (event.originalEvent.key == map_phrase[code_char-1])) {
+      // stay the same
+    } else {
+      code_char=0;
+    }
+
+    if (code_char>=map_phrase.length) {
+      $("#map").css("display", "inline")
+      code_char=0;
+    }
+
+    observer.y = Math.min((maze.length-1)*20, observer.y);
+    observer.x = Math.min((maze[0].length-1)*20, observer.x);
+
+    if (!valid_position(maze,observer.y,observer.x)) {
+      if (valid_position(maze,observer.y, x_at_start) && 
+         !((Math.round((observer.direction_rad % Math.PI) / (Math.PI/2)))%2)) {
+        observer.x = x_at_start;
+      } else if  (valid_position(maze, y_at_start, observer.x) &&
+         ((Math.round((observer.direction_rad % Math.PI) / (Math.PI/2)))%2)) {
+        observer.y = y_at_start;
+      } else {
+        observer.x = x_at_start;
+        observer.y = y_at_start;
+      }
+    }
+
+    let other_player_in_position = false;
+    player_list.forEach( 
+      (p, indx) => {
+        if ((Math.abs(observer.x - p['position-x'])<10) && 
+            (Math.abs(observer.y - p['position-y'])<10) &&
+            (p.level == LEVEL) &&
+            (p.id != PLAYER_ID)
+      ) {
+          other_player_in_position=true;
+          console.log(p, observer);
+        }
+      }
+    );
+
+    if (other_player_in_position) {
+      observer.x = x_at_start;
+      observer.y = y_at_start;
+      console.log("bump!");
+    }
+
+
+    if (!maze[Math.floor(observer.y/20,0)][Math.floor(observer.x/20, 0)].explored) {
+      maze[Math.floor(observer.y/20,0)][Math.floor(observer.x/20, 0)].explored=true;
+      if (!maze[Math.floor(observer.y/20,0)][Math.floor(observer.x/20, 0)].onmap) {
+        maze[Math.floor(observer.y/20,0)][Math.floor(observer.x/20, 0)].onmap=true;
+        update_map(Math.floor(observer.y/20,0),Math.floor(observer.x/20, 0))
+      }
+    }
+    show_all(observer, walls, maze)
+
+    if (observer.x > (MAZE_WIDTH-2)*20 && observer.y > (MAZE_HEIGHT-2)*20) {
+      next_level();
+    }
+
+    in_dead_end=false;
+    was_in_dead_end=false;
+    dead_ends.forEach( 
+      (position) => { 
+        let yt=position[0];
+        xt=position[1]; 
+        if (xt*20 < observer.x && (xt+1)*20 > observer.x &&
+            yt*20 < observer.y && (yt+1)*20 > observer.y) {
+          $("#map").css("display", "inline")
+          in_dead_end=true;
+        }
+        if (xt*20 < x_at_start && (xt+1)*20 > x_at_start &&
+            yt*20 < y_at_start && (yt+1)*20 > y_at_start) {
+          $("#map").css("display", "inline")
+          was_in_dead_end=true;
+        }
+      })
+
+    if (in_dead_end && !was_in_dead_end) {
+      $("#map").css("display", "inline");
+    }
+
+    if (!in_dead_end && was_in_dead_end) {
+      setTimeout(() => $("#map").css("display", "none"), 2500);
+    }
+
+    if (x_at_start != observer.x || y_at_start != observer.y || direction_at_start_rad != observer.direction_rad) {
+      socket.emit("maze", {"type": "user move", "x": observer.x, "y": observer.y});
+    } 
+
+
+    setTimeout( () => {if (is_key_down(event.originalEvent.key)) {move(event); }}, key_repeat_delay); 
+
+    /*
+    if (observer.x<=40 && observer.y<=40 && ( x_at_start >40 || y_at_start >40 )) { 
+      $("#map").css("display", "inline");
+    }
+
+    if ((observer.x>40 || observer.y>40) &&  x_at_start <=40 &&  y_at_start <=40 ) {
+      setTimeout(() => $("#map").css("display", "none"), 5000);
+    }
+    */
+  }
+
+  function show_player_on_viewport(observer, person, i) {
+
+    let data_string = "M "; 
+    let personId=i;
+
+    let angle_c1=calculate_polar_coordinates(observer, person['position-x'], person['position-y'], 0);
+    let angle_c2=calculate_polar_coordinates(observer, person['position-x'], person['position-y'], 15);
+
+    angle = angle_c1[0] - observer.direction_rad
+    angle = ((angle  % (Math.PI * 2)) + Math.PI*2 ) % (Math.PI*2);
+    if (angle > Math.PI) {
+      angle = angle - Math.PI*2;
+    }
+
+    let x1 = (angle / VISION_ANGLE_HORIZONTAL) * VISION_WIDTH + VISION_WIDTH / 2;
+    let y1 = (angle_c1[1] / VISION_ANGLE_VERTICAL) * VISION_HEIGHT + VISION_HEIGHT / 2;
+
+    let x2 = (angle / VISION_ANGLE_HORIZONTAL) * VISION_WIDTH + VISION_WIDTH / 2;
+    let y2 = (angle_c2[1] / VISION_ANGLE_VERTICAL) * VISION_HEIGHT + VISION_HEIGHT / 2;
+
+    let height = (y1-y2)
+    let scale = height / 290;
+    let xAdj = (x1-67.5*scale);
+    let yAdj = (y1+y2)/2-145*scale;
+
+    stick_person.forEach((d, indx)=>data_string += `${d[0]*scale+xAdj} ${d[1]*scale+yAdj}${indx===stick_person.length-1?"":", "}` ); 
+    let renderedPerson=$(`#person${personId}`);
+
+    if (renderedPerson.length == 0) {
+      $("#viewport").append(`<path id=person${personId} d="${data_string}" stroke=${person.color} fill=none stroke-width=${16*scale}px \>`);
+    } else {
+      $("#"+`person${personId}`).attr("d", data_string);
+      $("#"+`person${personId}`).attr("stroke", person.color);
+      $("#"+`person${personId}`).attr("stroke-width", `${16*scale}px`);
+    }
+
+    document.getElementById("viewport").innerHTML += "";
+  }
+
+  function show_all(observer, walls, maze) {
+
+    for(let i=0; i<walls.length; i++) {
+      walls[i].distance = (walls[i].x - observer.x)**2 + (walls[i].y - observer.y)**2;
+    }
+
+    walls.sort( (a,b) => a.distance < b.distance ? 1 : a.distance > b.distance ? -1 : 0 );
+
+    for (let i=0; i<walls.length; i++) {
+      show(observer, walls, i);
+    }
+
+    show_map(observer, walls, maze);
+    document.getElementById("viewport").innerHTML += "";
+
+
+    //distance = ((MAZE_WIDTH - observer.x/20)**2 + (MAZE_HEIGHT - observer.y/20)**2) / (MAZE_WIDTH**2 + MAZE_HEIGHT**2)
+    distance = (MAZE_HEIGHT-observer.y/20 + MAZE_WIDTH-observer.x/20) / (MAZE_HEIGHT + MAZE_WIDTH)
+    update_dashboard(observer.direction_rad, distance);
+  }
+
+  function update_dashboard(direction, distance) {
+    $("#direction-arrow").attr("x2", 50 + Math.sin(direction)*25);
+    $("#direction-arrow").attr("y2", 50 - Math.cos(direction)*25);
+
+    blue=Math.round(distance*255).toString(16);
+    red=(255-Math.round(distance*255)).toString(16);
+
+    $("#closeness").css("background-color", `#${red}00${blue}`);
+  }
+
+  function get_first_maze(username) {
+    socket.emit('maze', { "type" : "new maze", "level": LEVEL, "user" : username }, get_maze_callback);
+  }
+
+  function get_next_maze(username) {
+    $("body").off("keydown")
+    socket.emit('maze', { "type" : "new maze", "level": LEVEL, "user" : username }, get_maze_callback);
+  }
+
+  function countdown(remainingTime) {
+    console.log("countdown", remainingTime);
+
+    if ($("#countdown").length == 0) {
+      $("body").append("<div id=countdown style='position:absolute; left:300px; top:300px; font-size:400pt;'>"+remainingTime+"</div>");
+    } else {
+      $("#countdown").html(remainingTime);
+    }
+
+    if (remainingTime == 0) {
+      freeze=false;
+      $("#countdown").remove();
+    } else {
+      setTimeout(() => { countdown(remainingTime - 1); }, 1000);
+    }
+  }
+
+  function get_maze_callback(game_data, new_maze, new_dead_ends, player) {
+
+      if (!game_data.success) {
+        console.log("get_maze_callback game_data=",game_data, player);
+        createStartForm();
+        return;  
+      }
+
+      $("#sky").remove();
+      $("#ground").remove();
+
+      $("#viewport").append(`<path id=sky d="M 0 0, 1000 0, 1000 560,  0 560" fill='#aaf' />`);
+      $("#viewport").append(`<path id=ground d="M 0 1000, 1000 1000, 1000 560,  0 560" fill='#4f4' />`);   
+      $("body").on("keydown", move)
+
+      MAX_LEVEL = game_data.max_level;
+      PLAYER_ID = player.id;
+
+      freeze=true;
+      if (LEVEL === 0 ) {
+        countdown(5);
+      } else {
+        countdown(3);
+      }
+
+      console.log("maze message received", new_maze, new_dead_ends);
+      observer.color = player.color;
+      maze=new_maze;
+      dead_ends=new_dead_ends;
+
+      MAZE_HEIGHT=maze.length;
+      MAZE_WIDTH=maze[0].length;
+      walls=maze_to_walls(maze);
+      if (player.state==="playing") {
+        observer={x:30,y:30,z:15,direction_rad:Math.PI*8/16, color:player.color};
+      } 
+      rendered_map=false;
+
+      $("#myline1").attr("fill", "orange");
+      show_all(observer, walls, maze);
+      $("#map").css("display", "inline")
+  }
+
+  function maze_to_walls(maze) {
+    walls=[];
+    wall_height=20;
+    grid_size=20;
+    for (y=0; y<MAZE_HEIGHT; y++) {
+      for (x=0; x<MAZE_WIDTH; x++) {
+
+        if (x>MAZE_HEIGHT/2) {
+          if(y>MAZE_HEIGHT/2) {
+            wallColors=["#800", "#822", "#a22", "#a00"];
+          } else {
+            wallColors=["#fb4", "#fa2", "#f81", "#f51"];
+          }
+        } else {
+          if(y>MAZE_HEIGHT/2) {
+            wallColors=["#795695", "#371576", "#AC94f4", "#643b9f"];
+          } else {
+            wallColors=["#008", "#228", "#22a", "#00a"];
+          }
+        }
+
+        if (maze[y][x].present) {
+          if (x+1<MAZE_WIDTH && !maze[y][x+1].present) {
+            walls.push({x1:(x+1)*grid_size, x2:(x+1)*grid_size, y1:y*grid_size, y2:(y+1)*grid_size, z1:0, z2:wall_height, color:wallColors[0]});
+          }
+          if (x-1>0 && !maze[y][x-1].present) {
+            walls.push({x1:x*grid_size, x2:x*grid_size, y1:y*grid_size, y2:(y+1)*grid_size, z1:0, z2:wall_height, color:wallColors[1]});
+          }
+          if (y+1<MAZE_HEIGHT && !maze[y+1][x].present) {
+            walls.push({x1:x*grid_size, x2:(x+1)*grid_size, y1:(y+1)*grid_size, y2:(y+1)*grid_size, z1:0, z2:wall_height, color:wallColors[2]});
+          }
+          if (y-1>0 && !maze[y-1][x].present) {
+            walls.push({x1:x*grid_size, x2:(x+1)*grid_size, y1:y*grid_size, y2:y*grid_size, z1:0, z2:wall_height, color:wallColors[3]});
+          }
+        }
+      }
+    }
+
+    for (i=0; i<walls.length; i++) {
+      walls[i].x= Math.round((walls[i].x1 + walls[i].x2)/2);
+      walls[i].y= Math.round((walls[i].y1 + walls[i].y2)/2);
+    }
+
+    return walls;
+  }
+
+  function make_test_walls() {
+    walls = [
+      { x1:150, y1:0, x2:350, y2:0, z1:0, z2:100, color:"red" },
+      /*{ x1:50, y1:150, x2:50, y2:350, z1:0, z2:100, color:"blue" },
+      { x1:450, y1:150, x2:450, y2:350, z1:0, z2:100, color:"green" }
+      */
+      { x1:150, y1:500, x2:350, y2:500, z1:0, z2:100, color:"yellow" },
+    ]
+    return walls;
+  }
+
+
+  maze=[];
+  walls=[];
+  dead_ends=[];
+  observer={x:30,y:30,z:15,direction_rad:Math.PI*8/16};
+
+  debug=false;
+
+  function next_level() {
+    if (LEVEL+1 >= MAX_LEVEL) {
+      $("#map").css("display","inline");
+      if ($("#complete-banner").length===0) {
+        $("body").append("<div id='complete-banner' style='position:absolute; background-color:white; left:300px; top:300px; font-size:60pt; background-color:orange;'>Mission Complete<br><center><span style='font-size:20pt'>Press F5 to restart.</span></center></div>")
+      }
+    } else {
+      LEVEL+=1;
+      $("#viewport").empty()
+      $("#viewport").append(`<path id=sky d="M 0 0, 1000 0, 1000 560,  0 560" fill='#aaf' />`);
+      $("#viewport").append(`<path id=ground d="M 0 1000, 1000 1000, 1000 560,  0 560" fill='#4f4' />`);
+
+      $("#level").html(`Level ${LEVEL+1}`);
+      rendered_map=false;
+      get_next_maze(username);
+    }
+  }
+
+  function createStartForm() {
+    $("body").append("<div id=name-enter-dialog style='position:absolute; background-color:white; left:300px; top:300px; font-size:60pt; background-color:orange;'>Enter your name<br><center><span style='font-size:20pt'><form><input id=name></input><form></span></center></div>");
+    $("#name").focus();
+
+    $("#name-enter-dialog").on('submit', function(e) {
+      let name=$("#name").val();
+      if(name !== "") {
+        username=name.substr(0,20);
+        $("#name-enter-dialog").remove();
+        get_first_maze(name);
+      }
+    });
+
+  }
+
+  createStartForm();
+
+
+  const is_key_down = (() => {
+    const state = {};
+
+    window.addEventListener('keyup', (e) => state[e.key] = false);
+    window.addEventListener('keydown', (e) => state[e.key] = true);
+
+    return (key) => state.hasOwnProperty(key) && state[key] || false;
+  })();
+
+
+  socket.on('player update', function(msg) { 
+    let table="<table><tr><th>Player<th>Level<th>Completeness"
+
+    player_list = []
+    Object.entries(msg).forEach( (obj) => {
+      if (obj[1].name) {
+        player_list.push(obj[1]);
+      }
+    })
+
+    player_list.sort( (a,b) => {
+        return (a.level!==b.level) ? (b.level-a.level) : (b['position-x']+b['position-y']-a['position-x']-a['position-y']);
+    });
+
+    player_list.forEach( (p,i) => { 
+      if (p.id != PLAYER_ID && p.level == LEVEL) {
+        show_player_on_viewport(observer, p, i); } 
+      }
+    );
+
+    show_players_on_map(player_list);
+
+    player_list.forEach( (obj) => {
+      if (obj.name) {
+          let level = obj.level+1;
+          let x = obj['position-x'];
+        let y = obj['position-y'];
+        let completeness = Math.floor((x + y) / (( 2 * level + 5 ) * 2) * 5)
+
+        if (obj.state === "playing") {
+          table += `<tr style=background-color:${obj.color}><td>${obj.name}<td>${level}<td>${completeness}`;
+        } else {
+          positions = ["Champion", "Silver Medal", "Bronze Medal", "4th place", "5th place", "6th place"];
+          table += `<tr style=background-color:${obj.color}><td>${obj.name}<td>Complete<td>${positions[obj.position]}`;
+        }
+      }
+    });
+    table+='</table>';
+    $("#gamestatus").html(table);
+  });
+
+</script>
+
+</html>
