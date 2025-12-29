@@ -74,10 +74,13 @@ io.on('connection', (socket) => {
 
       console.log("msg.level", msg.level);
       if (msg.level == 0) {
-        player.color = choose(player_colors, true);
-        color = player_colors.splice(player_colors.indexOf(player.color), 1);
         player_names.push(msg.user);
         player['state'] = "playing";
+      }
+
+      if (!player.color) {
+        player.color = choose(player_colors, true);
+        color = player_colors.splice(player_colors.indexOf(player.color), 1);
       }
       console.log("player_names", player_names);
       console.log("new maze", msg.level);
@@ -117,6 +120,10 @@ io.on('connection', (socket) => {
     } else if (msg.type === "user move") {
 
       observer = players[socket.id]
+      if (observer.level === undefined) {
+        console.log("Player not initialized yet, ignoring move.");
+        return;
+      }
       console.log(observer, players)
       key = msg.key;
       shift = msg.shift

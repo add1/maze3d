@@ -328,15 +328,20 @@
   let freeze_phrase = "freeze";
   let restart_phrase_char = 0;
   let restart_phrase = "buhbye";
+  let waiting_for_server = false;
 
 
   let MOVE_DISTANCE = 10;
   let KEY_REPEAT_DELAY = 10;
 
   function update_position(event) {
-    let x_at_start = observer.x;
-    let y_at_start = observer.y;
-    let direction_at_start_rad = observer.direction_rad;
+    if (waiting_for_server) return true;
+
+    // Use local variables to calculate PROPOSED new position/direction
+    let next_x = observer.x;
+    let next_y = observer.y;
+    let next_direction_rad = observer.direction_rad;
+
     let shift = event.originalEvent.shiftKey;
 
     if (freeze) {
@@ -346,52 +351,64 @@
     // calculate new position based on key used.
     if (event.originalEvent.key == "ArrowRight") {
       if (shift) {
-        observer.x += Math.cos(observer.direction_rad) * MOVE_DISTANCE;
-        observer.y += Math.sin(observer.direction_rad) * MOVE_DISTANCE;
+        next_x += Math.cos(next_direction_rad) * MOVE_DISTANCE;
+        next_y += Math.sin(next_direction_rad) * MOVE_DISTANCE;
       } else {
-        observer.direction_rad += Math.PI / 6
+        next_direction_rad += Math.PI / 6
+        // KEY_REPEAT_DELAY needs to be handled cautiously, but keeping legacy behavior for now
         KEY_REPEAT_DELAY = 500;
       }
     }
     if (event.originalEvent.key == "ArrowLeft") {
       if (shift) {
-        observer.x -= Math.cos(observer.direction_rad) * MOVE_DISTANCE;
-        observer.y -= Math.sin(observer.direction_rad) * MOVE_DISTANCE;
+        next_x -= Math.cos(next_direction_rad) * MOVE_DISTANCE;
+        next_y -= Math.sin(next_direction_rad) * MOVE_DISTANCE;
       } else {
-        observer.direction_rad -= Math.PI / 6
+        next_direction_rad -= Math.PI / 6
         KEY_REPEAT_DELAY = 500;
       }
     }
     if (event.originalEvent.key == "ArrowUp") {
-      observer.x += Math.sin(observer.direction_rad) * MOVE_DISTANCE;
-      observer.y -= Math.cos(observer.direction_rad) * MOVE_DISTANCE;
+      next_x += Math.sin(next_direction_rad) * MOVE_DISTANCE;
+      next_y -= Math.cos(next_direction_rad) * MOVE_DISTANCE;
     }
     if (event.originalEvent.key == "ArrowDown") {
-      observer.x -= Math.sin(observer.direction_rad) * MOVE_DISTANCE;
-      observer.y += Math.cos(observer.direction_rad) * MOVE_DISTANCE;
+      next_x -= Math.sin(next_direction_rad) * MOVE_DISTANCE;
+      next_y += Math.cos(next_direction_rad) * MOVE_DISTANCE;
     }
 
-    if (direction_at_start_rad != observer.direction_rad) {
-      return true;
-    } else if (observer.x === x_at_start && observer.y === y_at_start) {
-      return false;
+    if (next_direction_rad == observer.direction_rad && next_x === observer.x && next_y === observer.y) {
+      return false; // No change
     }
 
     // correct for moving outside maze area
-    observer.y = Math.min((maze.length - 1) * 20, observer.y);
-    observer.x = Math.min((maze[0].length - 1) * 20, observer.x);
+    next_y = Math.min((maze.length - 1) * 20, next_y);
+    next_x = Math.min((maze[0].length - 1) * 20, next_x);
 
-    // correct for collision with walls
-    if (!valid_position(maze, observer.y, observer.x)) {
-      if (valid_position(maze, observer.y, x_at_start) &&
-        !((Math.round((observer.direction_rad % Math.PI) / (Math.PI / 2))) % 2)) {
-        observer.x = x_at_start;
-      } else if (valid_position(maze, y_at_start, observer.x) &&
-        ((Math.round((observer.direction_rad % Math.PI) / (Math.PI / 2))) % 2)) {
-        observer.y = y_at_start;
+    // correct for collision with walls (Client-side prediction check)
+    if (!valid_position(maze, next_y, next_x)) {
+      // Logic from original: slide along walls if possible
+      // But for server authority, simple rejection or partial movement is easier.
+      // Keeping original sliding logic but calculating against PREVIOUS (current) x/y
+
+      let can_slide_x = false;
+      let can_slide_y = false;
+
+      // Try keeping X (sliding Y)
+      if (valid_position(maze, next_y, observer.x) &&
+        !((Math.round((next_direction_rad % Math.PI) / (Math.PI / 2))) % 2)) {
+        next_x = observer.x;
+        can_slide_y = true;
+      }
+      // Try keeping Y (sliding X)
+      else if (valid_position(maze, observer.y, next_x) &&
+        ((Math.round((next_direction_rad % Math.PI) / (Math.PI / 2))) % 2)) {
+        next_y = observer.y;
+        can_slide_x = true;
       } else {
-        observer.x = x_at_start;
-        observer.y = y_at_start;
+        // Blocked completely
+        next_x = observer.x;
+        next_y = observer.y;
       }
     }
 
@@ -399,79 +416,93 @@
     let other_player_in_position = false;
     player_list.forEach(
       (p, indx) => {
-        if ((Math.abs(observer.x - p['position-x']) < 10) &&
-          (Math.abs(observer.y - p['position-y']) < 10) &&
+        if ((Math.abs(next_x - p['position-x']) < 10) &&
+          (Math.abs(next_y - p['position-y']) < 10) &&
           (p.level == LEVEL) &&
           (p.id != PLAYER_ID)
         ) {
           other_player_in_position = true;
-          console.log(p, observer);
         }
       }
     );
 
     if (other_player_in_position) {
-      observer.x = x_at_start;
-      observer.y = y_at_start;
+      next_x = observer.x;
+      next_y = observer.y;
       console.log("bump!");
     }
 
-    // update the maze floor with the 'slug trail'
-    if (!maze[Math.floor(observer.y / 20, 0)][Math.floor(observer.x / 20, 0)].explored) {
-      maze[Math.floor(observer.y / 20, 0)][Math.floor(observer.x / 20, 0)].explored = true;
-      if (!maze[Math.floor(observer.y / 20, 0)][Math.floor(observer.x / 20, 0)].onmap) {
-        maze[Math.floor(observer.y / 20, 0)][Math.floor(observer.x / 20, 0)].onmap = true;
-        update_map(Math.floor(observer.y / 20, 0), Math.floor(observer.x / 20, 0))
-      }
+    // If after collision checks we are still at start, return true (consumed) but don't emit
+    if (next_x === observer.x && next_y === observer.y && next_direction_rad === observer.direction_rad) {
+      return true;
     }
 
-    // collect power up: show map
-    in_dead_end = false;
-    was_in_dead_end = false;
-    dead_ends.forEach(
-      (position) => {
-        let yt = position[0];
-        xt = position[1];
-        if (xt * 20 < observer.x && (xt + 1) * 20 > observer.x &&
-          yt * 20 < observer.y && (yt + 1) * 20 > observer.y) {
-          $("#map").css("display", "inline")
-          in_dead_end = true;
-        }
-        if (xt * 20 < x_at_start && (xt + 1) * 20 > x_at_start &&
-          yt * 20 < y_at_start && (yt + 1) * 20 > y_at_start) {
-          $("#map").css("display", "inline")
-          was_in_dead_end = true;
-        }
-      })
-    if (in_dead_end && !was_in_dead_end) {
-      $("#map").css("display", "inline");
-    }
-    if (!in_dead_end && was_in_dead_end) {
-      setTimeout(() => $("#map").css("display", "none"), 2500);
-    }
-
-
-    // is maze is complete
-    if (observer.x > (MAZE_WIDTH - 2) * 20 && observer.y > (MAZE_HEIGHT - 2) * 20) {
-      next_level();
-    } else if (x_at_start != observer.x || y_at_start != observer.y || direction_at_start_rad != observer.direction_rad) {
-      socket.emit("maze",
-        {
-          "type": "user move",
-          "x": observer.x,
-          "y": observer.y,
-          "key": event.originalEvent.key,
-          "shift": shift,
-        },
-        user_move_callback
-      );
-    }
+    // Proposed move is valid and different. Emit to server.
+    waiting_for_server = true;
+    socket.emit("maze",
+      {
+        "type": "user move",
+        "x": next_x, // Sending PROPOSED next coordinate
+        "y": next_y,
+        "key": event.originalEvent.key, // Server might still use key for rotation logic or logging
+        "shift": shift,
+      },
+      user_move_callback
+    );
 
     return true;
   }
 
-  function user_move_callback(observer, moved) {
-    // TODO:
+  function user_move_callback(data) {
+    let server_observer = data.observer;
+    waiting_for_server = false;
+
+    // Update local observer with server state
+    observer.x = server_observer.x;
+    observer.y = server_observer.y;
+    observer.direction_rad = server_observer.direction_rad;
+    observer['position-x'] = server_observer.x;
+    observer['position-y'] = server_observer.y;
+
+    // Update slug trail (moved from update_position)
+    let grid_x = Math.floor(observer.x / 20);
+    let grid_y = Math.floor(observer.y / 20);
+
+    if (grid_x >= 0 && grid_x < MAZE_WIDTH && grid_y >= 0 && grid_y < MAZE_HEIGHT) {
+      if (!maze[grid_y][grid_x].explored) {
+        maze[grid_y][grid_x].explored = true;
+        if (!maze[grid_y][grid_x].onmap) {
+          maze[grid_y][grid_x].onmap = true;
+          update_map(grid_y, grid_x);
+        }
+      }
+    }
+
+    // Check dead ends (moved from update_position)
+    let in_dead_end = false;
+    let was_in_dead_end = false;
+    dead_ends.forEach((position) => {
+      let yt = position[0];
+      let xt = position[1];
+      // Using server coords
+      if (xt * 20 < observer.x && (xt + 1) * 20 > observer.x &&
+        yt * 20 < observer.y && (yt + 1) * 20 > observer.y) {
+        $("#map").css("display", "inline");
+        in_dead_end = true;
+      }
+    });
+    // Simplified map display logic for brevity/robustness
+    if (in_dead_end) {
+      $("#map").css("display", "inline");
+      setTimeout(() => $("#map").css("display", "none"), 2500);
+    }
+
+    // Check level complete
+    if (observer.x > (MAZE_WIDTH - 2) * 20 && observer.y > (MAZE_HEIGHT - 2) * 20) {
+      next_level();
+    }
+
+    show_all(observer, walls, maze);
   }
 
   function move(event) {
@@ -550,6 +581,12 @@
     for (let i = 0; i < walls.length; i++) {
       show(observer, walls, i);
     }
+
+    player_list.forEach((p, i) => {
+      if (p.id != PLAYER_ID && p.level == LEVEL) {
+        show_player_on_viewport(observer, p, i);
+      }
+    });
 
     show_map(observer, walls, maze);
     document.getElementById("viewport").innerHTML += "";
@@ -795,13 +832,7 @@
       return (a.level !== b.level) ? (b.level - a.level) : (b['position-x'] + b['position-y'] - a['position-x'] - a['position-y']);
     });
     */
-
-    player_list.forEach((p, i) => {
-      if (p.id != PLAYER_ID && p.level == LEVEL) {
-        show_player_on_viewport(observer, p, i);
-      }
-    }
-    );
+    /* Player rendering moved to show_all */
 
     if (map) {
 
@@ -809,6 +840,9 @@
 
       show_players_on_map(player_list);
     }
+
+    // Ensure we render the scene (including other players) even if our own position hasn't changed
+    show_all(observer, walls, maze);
 
     player_list.forEach((obj) => {
       if (obj.name) {
