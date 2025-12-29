@@ -1,0 +1,7 @@
+### build files
+node_modules     
+package-lock.json
+
+
+### vim swap files
+.sw?
