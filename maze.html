@@ -175,7 +175,6 @@
   }
 
   function show_players_on_map(player_list) {
-    console.log("in show_players_on_map:", map);
     map.find(".players").remove()
     for (let i = 0; i < player_list.length; i++) {
       if (player_list[i].id !== PLAYER_ID && player_list[i].level === LEVEL) {
@@ -228,14 +227,11 @@
         wall = wall.concat(`, ${corners[i][0]} ${corners[i][1]}`);
       }
 
-      console.log("show:", wallid, "x", (walls[wallid].x1 + walls[wallid].x2) / 2, "y", (walls[wallid].y1 + walls[wallid].y2) / 2, "dist", distance, corners);
       wall += ' Z';
 
       if (rendered_wall.length == 0) {
-        console.log("wall length is 0");
         $("#viewport").append(`<path id=myline${wallid} d="${wall}" stroke=black stroke-width=5px fill=${walls[wallid].color}\>`);
       } else {
-        console.log("wall length is not 0");
         $("#" + `myline${wallid}`).attr("d", wall);
         $("#" + `myline${wallid}`).attr("fill", walls[wallid].color);
         $("#" + `myline${wallid}`).attr("stroke-width", "5px");
@@ -278,6 +274,7 @@
     } else {
       freeze_phrase_char = 0;
     }
+
     if (freeze_phrase_char >= freeze_phrase.length) {
       console.log("wrap up warm baby");
       socket.emit("maze", { "type": "power up", "powerUpType": "freeze_bomb", "duration": 5 });
@@ -607,13 +604,26 @@
     $("#closeness").css("background-color", `#${red}00${blue}`);
   }
 
+  function mark_maze_unexplored(maze) {
+    MAZE_WIDTH = maze.length;
+    MAZE_HEIGHT = maze[0].length;
+    for (let row = 0; row < MAZE_HEIGHT; row++) {
+      for (let column = 0; column < MAZE_WIDTH; column++) {
+        maze[row][column].explored = false;
+      }
+    }
+
+  }
+
   function get_first_maze(username) {
     socket.emit('maze', { "type": "new maze", "level": LEVEL, "user": username }, get_maze_callback);
     $("body").on("keydown", move)
+    mark_maze_unexplored(maze);
   }
 
   function get_next_maze(username) {
     socket.emit('maze', { "type": "new maze", "level": LEVEL, "user": username }, get_maze_callback);
+    mark_maze_unexplored(maze);
   }
 
   function countdown(remainingTime) {
@@ -806,7 +816,7 @@
       if (player.state === 'frozen') {
         if (!freeze) {
           freeze = true;
-          $("body").append("<div id='freeze-bomb-banner' style='position:absolute; background-color:white; left:300px; top:300px; font-size:60pt; background-color:orange;'> Freeze bomb! <br><center><span style='font-size:20pt'> Just chill for a few seconds </span></center></div>");
+          $("body").append("<div id='freeze-bomb-banner' style='position:absolute; background-color:white; left:300px; top:300px; font-size:60pt; background-color:orange;'> Get Ready! <br><center><span style='font-size:20pt'> </span></center></div>");
         }
       } else {
         if (freeze) {
@@ -835,9 +845,6 @@
     /* Player rendering moved to show_all */
 
     if (map) {
-
-      console.log("calling show_players_on_map", map);
-
       show_players_on_map(player_list);
     }
 
